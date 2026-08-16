@@ -1,0 +1,214 @@
+<?php
+/**
+ * GitHub 文件加速代理
+ * 用法：https://ghproxy.wldwz.icu/https://github.com/user/repo/releases/download/v1/file.zip
+ *      https://ghproxy.wldwz.icu/raw.githubusercontent.com/user/repo/main/file.txt
+ */
+
+define('CACHE_DIR', __DIR__ . '/cache/');
+if (!is_dir(CACHE_DIR)) {
+    @mkdir(CACHE_DIR, 0777, true);
+}
+
+// 获取目标 URL
+$uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/';
+$path = ltrim($uri, '/');
+
+// 无目标 → 显示使用说明首页
+if ($path === '' || $path === 'index.php') {
+    show_index();
+    exit;
+}
+
+// 解析目标 URL（容错处理多种写法）
+$target = $path;
+if (preg_match('#^https?:/{2,}#', $target)) {
+    // https://xxx 或 http:///xxx（斜杠被合并）
+    $target = preg_replace('#^https?:/{2,}#', 'https://', $target);
+} elseif (preg_match('#^[a-z0-9.-]+\.(com|io|org|net)/#', $target) && !preg_match('#^https?://#', $target)) {
+    // github.com/xxx 形式（无 scheme）
+    $target = 'https://' . $target;
+} elseif (!preg_match('#^https?://#', $target)) {
+    show_index();
+    exit;
+}
+
+// 白名单域名（防止 SSRF）
+$allowed_hosts = [
+    'github.com',
+    'raw.githubusercontent.com',
+    'gist.githubusercontent.com',
+    'objects.githubusercontent.com',
+    'github.githubassets.com',
+    'codeload.github.com',
+    'api.github.com',
+    'release-assets.githubusercontent.com',
+];
+
+$host = parse_url($target, PHP_URL_HOST);
+if (!$host || !in_array($host, $allowed_hosts)) {
+    http_response_code(403);
+    header('Content-Type: text/plain; charset=utf-8');
+    exit('Forbidden: 仅支持 GitHub 相关域名');
+}
+
+// 缓存文件
+$cache_file = CACHE_DIR . md5($target);
+
+// 缓存命中，直接返回
+if (is_file($cache_file) && filesize($cache_file) > 0) {
+    serve_file($cache_file, $target);
+    exit;
+}
+
+// 下载到缓存
+$fp = @fopen($cache_file, 'wb');
+if (!$fp) {
+    http_response_code(500);
+    header('Content-Type: text/plain; charset=utf-8');
+    exit('无法写入缓存目录，请检查权限');
+}
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => $target,
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_MAXREDIRS => 10,
+    CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+    CURLOPT_SSL_VERIFYPEER => true,
+    CURLOPT_CONNECTTIMEOUT => 15,
+    CURLOPT_TIMEOUT => 0,
+    CURLOPT_FILE => $fp,
+    CURLOPT_HEADER => false,
+]);
+$ok = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$curl_err = curl_error($ch);
+curl_close($ch);
+fclose($fp);
+
+// 失败处理
+if (!$ok || $http_code >= 400) {
+    @unlink($cache_file);
+    http_response_code($http_code >= 100 ? $http_code : 502);
+    header('Content-Type: text/plain; charset=utf-8');
+    exit('下载失败：' . ($curl_err ? $curl_err : ('HTTP ' . $http_code)));
+}
+
+serve_file($cache_file, $target);
+exit;
+
+// 输出文件
+function serve_file($file, $url) {
+    $size = filesize($file);
+    $name = basename(parse_url($url, PHP_URL_PATH));
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $mime = mime_type($ext);
+    header('Content-Type: ' . $mime);
+    header('Content-Length: ' . $size);
+    header('Accept-Ranges: bytes');
+    // 可下载文件类型用 attachment，其余 inline
+    $inline = ['jpg','jpeg','png','gif','svg','webp','ico','txt','md','js','css','json','html','xml','pdf','mp3','mp4','webm'];
+    $disposition = in_array($ext, $inline) ? 'inline' : 'attachment';
+    header('Content-Disposition: ' . $disposition . '; filename="' . $name . '"');
+    readfile($file);
+}
+
+// MIME 映射
+function mime_type($ext) {
+    $map = [
+        'zip' => 'application/zip',
+        'gz' => 'application/gzip',
+        'tgz' => 'application/gzip',
+        'rar' => 'application/x-rar-compressed',
+        '7z' => 'application/x-7z-compressed',
+        'tar' => 'application/x-tar',
+        'bz2' => 'application/x-bzip2',
+        'xz' => 'application/x-xz',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif',
+        'svg' => 'image/svg+xml',
+        'webp' => 'image/webp',
+        'ico' => 'image/x-icon',
+        'bmp' => 'image/bmp',
+        'txt' => 'text/plain',
+        'md' => 'text/markdown',
+        'js' => 'application/javascript',
+        'css' => 'text/css',
+        'json' => 'application/json',
+        'html' => 'text/html',
+        'htm' => 'text/html',
+        'xml' => 'application/xml',
+        'pdf' => 'application/pdf',
+        'mp3' => 'audio/mpeg',
+        'mp4' => 'video/mp4',
+        'webm' => 'video/webm',
+        'ogg' => 'audio/ogg',
+        'wav' => 'audio/wav',
+        'exe' => 'application/octet-stream',
+        'msi' => 'application/octet-stream',
+        'apk' => 'application/vnd.android.package-archive',
+        'deb' => 'application/x-debian-package',
+        'rpm' => 'application/x-rpm',
+        'dmg' => 'application/x-apple-diskimage',
+        'appimage' => 'application/octet-stream',
+        'sh' => 'text/x-shellscript',
+        'py' => 'text/x-python',
+        'wasm' => 'application/wasm',
+    ];
+    return isset($map[$ext]) ? $map[$ext] : 'application/octet-stream';
+}
+
+// 使用说明首页
+function show_index() {
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitHub 文件加速代理</title>
+<style>
+body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;max-width:760px;margin:60px auto;padding:0 20px;color:#1f2937;background:#f8fafc;}
+h1{font-size:24px;color:#0d9488;}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,.05);margin-bottom:16px;}
+code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:13px;color:#0f766e;word-break:break-all;}
+input{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;box-sizing:border-box;}
+button{margin-top:10px;padding:10px 20px;background:#0d9488;color:#fff;border:0;border-radius:8px;cursor:pointer;font-size:14px;}
+button:hover{background:#0f766e;}
+.hint{font-size:13px;color:#64748b;line-height:1.8;}
+</style>
+</head>
+<body>
+<h1>GitHub 文件加速代理</h1>
+<div class="card">
+<div class="hint"><b>用法：</b>在 GitHub 链接前加上本代理域名即可。</div>
+<br>
+<div class="hint"><b>示例：</b></div>
+<div class="hint">原始链接：<br><code>https://github.com/user/repo/releases/download/v1.0/app.zip</code></div>
+<br>
+<div class="hint">加速链接：<br><code>https://' . $_SERVER['HTTP_HOST'] . '/https://github.com/user/repo/releases/download/v1.0/app.zip</code></div>
+<br>
+<div class="hint"><b>快速转换：</b></div>
+<input type="text" id="src" placeholder="粘贴 GitHub 链接">
+<button onclick="convert()">转换</button>
+<div class="hint" id="result" style="margin-top:10px;"></div>
+</div>
+<div class="card">
+<div class="hint"><b>支持的域名：</b>github.com / raw.githubusercontent.com / gist / codeload / objects.githubusercontent.com 等</div>
+<br>
+<div class="hint"><b>说明：</b>文件首次访问会缓存到服务器，之后秒开。仅供个人加速使用。</div>
+</div>
+<script>
+function convert(){
+    var v = document.getElementById("src").value.trim();
+    if(!v) return;
+    if(!/^https?:\/\//.test(v)) v = "https://" + v;
+    document.getElementById("result").innerHTML = "加速链接：<br><code>" + location.origin + "/" + v + "</code>";
+}
+</script>
+</body>
+</html>';
+}
