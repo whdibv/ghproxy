@@ -92,18 +92,34 @@ php -S 0.0.0.0:8080 index.php
 
 ## 缓存机制
 
+**智能缓存时长**（根据 URL 路径自动选择）：
+
+| 路径类型 | 示例 | 缓存时长 |
+|---|---|---|
+| 动态内容 | `/main/`、`/master/`、`/latest/`、`/nightly/` | 1 小时 |
+| 固定版本 | `/releases/download/v1.0/`、`/archive/refs/tags/` | 30 天 |
+| 普通路径 | 其他 | 1 天 |
+
 - 缓存文件存放于 `cache/` 目录，按目标 URL 的 MD5 命名
-- 首次访问：从 GitHub 下载 → 写入缓存 → 返回
-- 再次访问（7 天内）：直接读取缓存，不请求 GitHub
-- **缓存有效期 7 天**，过期后自动重新下载
-- **自动清理**：约 1% 请求会触发一次过期缓存清理，防止缓存目录无限膨胀（适合空间有限的虚拟主机）
+- **自动清理**：约 1% 请求会触发清理超过 30 天的缓存，防止空间膨胀
 - 手动清理：删除 `cache/` 目录下文件即可
 
 ```bash
 rm -rf cache/*
 ```
 
-> 如需调整有效期，修改 `index.php` 顶部的 `CACHE_TTL` 常量（单位：秒）。
+> 响应头 `X-Cache-Status`（HIT/MISS）可查看是否命中缓存。
+
+## Git Clone 加速
+
+```bash
+# 方法一：全局替换（一次配置，长期生效）
+git config --global url."https://ghproxy.example.com/github.com/".insteadOf "https://github.com/"
+git clone https://github.com/user/repo.git
+
+# 方法二：直接替换 URL
+git clone https://ghproxy.example.com/github.com/user/repo.git
+```
 
 ## 常见问题
 
@@ -117,7 +133,7 @@ A：不会。使用 curl 流式写入，不把整个文件读进内存。
 A：不能。只允许白名单内的 GitHub 域名，这是为了安全（防止被当作通用代理滥用）。
 
 **Q：缓存多久过期？**
-A：默认 7 天。过期后自动重新下载，同时会自动清理过期文件，不用担心空间膨胀。
+A：智能缓存——动态内容（如 main/master 分支）1 小时，固定版本（release/tag）30 天，普通路径 1 天。过期后自动重新下载，同时自动清理 30 天以上的缓存文件。
 
 ## 安全说明
 
