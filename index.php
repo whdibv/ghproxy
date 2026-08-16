@@ -6,6 +6,7 @@
  */
 
 define('CACHE_DIR', __DIR__ . '/cache/');
+define('CACHE_TTL', 7 * 24 * 3600); // 缓存有效期：7 天
 if (!is_dir(CACHE_DIR)) {
     @mkdir(CACHE_DIR, 0777, true);
 }
@@ -55,10 +56,15 @@ if (!$host || !in_array($host, $allowed_hosts)) {
 // 缓存文件
 $cache_file = CACHE_DIR . md5($target);
 
-// 缓存命中，直接返回
-if (is_file($cache_file) && filesize($cache_file) > 0) {
+// 缓存命中（且未过期），直接返回
+if (is_file($cache_file) && filesize($cache_file) > 0 && (time() - filemtime($cache_file)) < CACHE_TTL) {
     serve_file($cache_file, $target);
     exit;
+}
+
+// 概率性清理过期缓存（约 1% 请求触发，避免缓存目录无限膨胀）
+if (mt_rand(1, 100) === 1) {
+    clean_expired_cache();
 }
 
 // 下载到缓存
@@ -97,6 +103,18 @@ if (!$ok || $http_code >= 400) {
 
 serve_file($cache_file, $target);
 exit;
+
+// 清理过期缓存文件
+function clean_expired_cache() {
+    $files = glob(CACHE_DIR . '*');
+    if (!$files) return;
+    $now = time();
+    foreach ($files as $f) {
+        if (is_file($f) && ($now - filemtime($f)) > CACHE_TTL) {
+            @unlink($f);
+        }
+    }
+}
 
 // 输出文件
 function serve_file($file, $url) {
