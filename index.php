@@ -6,9 +6,25 @@
  */
 
 define('CACHE_DIR', __DIR__ . '/cache/');
-define('CACHE_TTL', 7 * 24 * 3600); // 缓存有效期：7 天
+define('CACHE_TTL_DEFAULT', 24 * 3600);     // 普通路径缓存 1 天
+define('CACHE_TTL_MAX', 30 * 24 * 3600);    // 最长缓存（自动清理阈值）
 if (!is_dir(CACHE_DIR)) {
     @mkdir(CACHE_DIR, 0777, true);
+}
+
+// 根据 URL 路径智能选择缓存时长（参考 cf-ghproxy-worker 设计）
+function cache_ttl($url) {
+    $path = parse_url($url, PHP_URL_PATH);
+    if (!$path) return CACHE_TTL_DEFAULT;
+    // 动态内容（分支名/最新版）：短缓存，保证拿到最新
+    if (preg_match('#/(latest|main|master|nightly|dev|canary|head)(/|\.|$)#i', $path)) {
+        return 3600; // 1 小时
+    }
+    // 固定版本（release/标签）：长缓存
+    if (preg_match('#/(releases/download|archive/refs/tags|tags)/#i', $path)) {
+        return CACHE_TTL_MAX; // 30 天
+    }
+    return CACHE_TTL_DEFAULT;
 }
 
 // 获取目标 URL
@@ -57,10 +73,14 @@ if (!$host || !in_array($host, $allowed_hosts)) {
 $cache_file = CACHE_DIR . md5($target);
 
 // 缓存命中（且未过期），直接返回
-if (is_file($cache_file) && filesize($cache_file) > 0 && (time() - filemtime($cache_file)) < CACHE_TTL) {
+$ttl = cache_ttl($target);
+if (is_file($cache_file) && filesize($cache_file) > 0 && (time() - filemtime($cache_file)) < $ttl) {
+    header('X-Cache-Status: HIT');
+    header('X-Cache-TTL: ' . $ttl);
     serve_file($cache_file, $target);
     exit;
 }
+header('X-Cache-Status: MISS');
 
 // 概率性清理过期缓存（约 1% 请求触发，避免缓存目录无限膨胀）
 if (mt_rand(1, 100) === 1) {
@@ -104,13 +124,13 @@ if (!$ok || $http_code >= 400) {
 serve_file($cache_file, $target);
 exit;
 
-// 清理过期缓存文件
+// 清理过期缓存文件（只清理超过最长 TTL 的，保守避免误删）
 function clean_expired_cache() {
     $files = glob(CACHE_DIR . '*');
     if (!$files) return;
     $now = time();
     foreach ($files as $f) {
-        if (is_file($f) && ($now - filemtime($f)) > CACHE_TTL) {
+        if (is_file($f) && ($now - filemtime($f)) > CACHE_TTL_MAX) {
             @unlink($f);
         }
     }
