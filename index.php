@@ -8,6 +8,7 @@
 define('CACHE_DIR', __DIR__ . '/cache/');
 define('CACHE_TTL_DEFAULT', 24 * 3600);     // 普通路径缓存 1 天
 define('CACHE_TTL_MAX', 30 * 24 * 3600);    // 最长缓存（自动清理阈值）
+define('MAX_CACHE_SIZE', 50 * 1024 * 1024); // 超过 50MB 不缓存，直接流式转发
 if (!is_dir(CACHE_DIR)) {
     @mkdir(CACHE_DIR, 0777, true);
 }
@@ -82,6 +83,15 @@ if (is_file($cache_file) && filesize($cache_file) > 0 && (time() - filemtime($ca
 }
 header('X-Cache-Status: MISS');
 
+// 大文件：探测大小，超过阈值则流式转发（不缓存，避免撑爆磁盘）
+$remote_size = remote_size($target);
+if ($remote_size !== false && $remote_size > MAX_CACHE_SIZE) {
+    header('X-Cache-Status: BYPASS');
+    header('X-Cache-TTL: 0');
+    stream_forward($target);
+    exit;
+}
+
 // 概率性清理过期缓存（约 1% 请求触发，避免缓存目录无限膨胀）
 if (mt_rand(1, 100) === 1) {
     clean_expired_cache();
@@ -123,6 +133,72 @@ if (!$ok || $http_code >= 400) {
 
 serve_file($cache_file, $target);
 exit;
+
+// 探测远程文件大小（Range 请求，对 release 重定向更可靠）
+function remote_size($url) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 10,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER => true,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_RANGE => '0-0', // 只请求第一个字节
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($code >= 200 && $code < 300) {
+        // 优先从 Content-Range 拿总大小（bytes 0-0/TOTAL）
+        if (preg_match('/Content-Range:\s*bytes\s+0-0\/(\d+)/i', $resp, $m)) {
+            return (int)$m[1];
+        }
+        // 退而求其次用 Content-Length
+        if (preg_match('/Content-Length:\s*(\d+)/i', $resp, $m)) {
+            return (int)$m[1];
+        }
+    }
+    return false;
+}
+
+// 大文件流式转发（边下边传，不落盘）
+function stream_forward($url) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 10,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT => 0,
+        CURLOPT_HEADERFUNCTION => function($ch, $header) {
+            $len = strlen($header);
+            $h = trim($header);
+            if (stripos($h, 'content-type:') === 0 ||
+                stripos($h, 'content-length:') === 0 ||
+                stripos($h, 'content-disposition:') === 0 ||
+                stripos($h, 'content-range:') === 0 ||
+                stripos($h, 'accept-ranges:') === 0) {
+                header($h);
+            }
+            return $len;
+        },
+        CURLOPT_WRITEFUNCTION => function($ch, $data) {
+            echo $data;
+            if (ob_get_level() > 0) { ob_flush(); }
+            flush();
+            return strlen($data);
+        },
+    ]);
+    set_time_limit(0);
+    curl_exec($ch);
+    curl_close($ch);
+}
 
 // 清理过期缓存文件（只清理超过最长 TTL 的，保守避免误删）
 function clean_expired_cache() {
