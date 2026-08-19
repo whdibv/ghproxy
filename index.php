@@ -9,9 +9,19 @@ define('CACHE_DIR', __DIR__ . '/cache/');
 define('CACHE_TTL_DEFAULT', 24 * 3600);     // 普通路径缓存 1 天
 define('CACHE_TTL_MAX', 30 * 24 * 3600);    // 最长缓存（自动清理阈值）
 define('MAX_CACHE_SIZE', 50 * 1024 * 1024); // 超过 50MB 不缓存，直接流式转发
+define('BIG_FILE_THRESHOLD', 200 * 1024 * 1024); // 超过 200MB 不转发，展示第三方加速节点
 if (!is_dir(CACHE_DIR)) {
     @mkdir(CACHE_DIR, 0777, true);
 }
+
+// 第三方加速节点（大文件分流用：虚拟主机带宽有限，超大文件交给公共 CDN 节点）
+$THIRD_PARTY_NODES = [
+    ['name' => 'Cloudflare 优选', 'host' => 'https://gh-proxy.org',   'note' => '全球高速分发，国内优选 + IPv6 支持'],
+    ['name' => 'Cloudflare v4（推荐）', 'host' => 'https://v4.gh-proxy.org', 'note' => '优选加速，仅 IPv4，智能解析'],
+    ['name' => 'Cloudflare v4/v6', 'host' => 'https://v6.gh-proxy.org', 'note' => '优选加速，支持 IPv6 / IPv4'],
+    ['name' => 'Fastly CDN',       'host' => 'https://cdn.gh-proxy.org', 'note' => 'Fastly CDN 节点加速（v4）'],
+    ['name' => 'AxisNow 三网优选', 'host' => 'https://axisnow.gh-proxy.org', 'note' => '三网优选节点，仅 IPv4'],
+];
 
 // 根据 URL 路径智能选择缓存时长（参考 cf-ghproxy-worker 设计）
 function cache_ttl($url) {
@@ -86,6 +96,13 @@ header('X-Cache-Status: MISS');
 // 大文件：探测大小，超过阈值则流式转发（不缓存，避免撑爆磁盘）
 $remote_size = remote_size($target);
 if ($remote_size !== false && $remote_size > MAX_CACHE_SIZE) {
+    // 超大文件（>200MB）：本机带宽有限，展示第三方加速节点选择页
+    if ($remote_size > BIG_FILE_THRESHOLD) {
+        header('X-Cache-Status: BIG-REDIRECT');
+        header('X-Cache-TTL: 0');
+        show_third_party($target, $remote_size);
+        exit;
+    }
     header('X-Cache-Status: BYPASS');
     header('X-Cache-TTL: 0');
     stream_forward($target);
@@ -275,6 +292,56 @@ function mime_type($ext) {
     return isset($map[$ext]) ? $map[$ext] : 'application/octet-stream';
 }
 
+// 超大文件：展示第三方加速节点选择页（本机带宽有限，交给公共 CDN 节点分发）
+function show_third_party($url, $size) {
+    global $THIRD_PARTY_NODES;
+    // 格式化大小
+    if ($size >= 1073741824) $size_txt = round($size / 1073741824, 2) . ' GB';
+    elseif ($size >= 1048576) $size_txt = round($size / 1048576, 1) . ' MB';
+    else $size_txt = round($size / 1024, 1) . ' KB';
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件过大 · 请选择加速节点</title>
+<style>
+body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1f2937;background:#f8fafc;}
+h1{font-size:22px;color:#b45309;}
+.card{background:#fff;border-radius:12px;padding:22px;box-shadow:0 2px 10px rgba(0,0,0,.05);margin-bottom:14px;}
+code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:12.5px;color:#0f766e;word-break:break-all;display:block;margin:8px 0;}
+a.node{display:block;padding:12px 14px;border:1px solid #e2e8f0;border-radius:10px;text-decoration:none;color:#1f2937;margin-bottom:10px;transition:.15s;}
+a.node:hover{border-color:#0d9488;background:#f0fdfa;}
+.node b{color:#0d9488;font-size:14px;}
+.node span{display:block;font-size:12px;color:#94a3b8;margin-top:3px;}
+.node .btn{margin-top:8px;display:inline-block;padding:4px 14px;background:#0d9488;color:#fff;border-radius:6px;font-size:12px;}
+.origin{font-size:12px;color:#64748b;}
+.notice{font-size:12.5px;color:#b45309;background:#fef3c7;border-radius:8px;padding:10px 14px;margin-bottom:14px;line-height:1.7;}
+.back{display:inline-block;margin-top:6px;color:#0d9488;text-decoration:none;font-size:13px;}
+</style>
+</head>
+<body>
+<h1>📦 文件过大（' . $size_txt . '）</h1>
+<div class="notice">本代理服务器带宽有限（10Mbps），超过 200MB 的文件不提供中转，请直接使用下方 <b>第三方加速节点</b> 下载（Cloudflare / Fastly 等公共 CDN，速度远超本机）。若某个节点失败或太慢，换一个节点即可。</div>
+<div class="card">
+<div class="origin">原始文件：</div>
+<code>' . htmlspecialchars($url) . '</code>';
+    foreach ($THIRD_PARTY_NODES as $node) {
+        $link = $node['host'] . '/' . $url;
+        echo '<a class="node" href="' . htmlspecialchars($link) . '" target="_blank" rel="noopener">
+<b>' . htmlspecialchars($node['name']) . '</b>
+<span>' . htmlspecialchars($node['note']) . '</span>
+<code>' . htmlspecialchars($link) . '</code>
+<span class="btn">直接打开 ↗</span>
+</a>';
+    }
+    echo '</div>
+<p style="text-align:center;margin:10px 0 30px;"><a class="back" href="/">← 返回首页</a></p>
+</body>
+</html>';
+}
+
 // 使用说明首页
 function show_index() {
     header('Content-Type: text/html; charset=utf-8');
@@ -313,7 +380,7 @@ button:hover{background:#0f766e;}
 <div class="card">
 <div class="hint"><b>支持的域名：</b>github.com / raw.githubusercontent.com / gist / codeload / objects.githubusercontent.com 等</div>
 <br>
-<div class="hint"><b>说明：</b>文件首次访问会缓存到服务器，之后秒开。仅供个人加速使用。</div>
+<div class="hint"><b>说明：</b>文件首次访问会缓存到服务器，之后秒开。50MB 以内自动缓存，50-200MB 流式转发，超过 200MB 提供第三方高速节点下载。</div>
 </div>
 <div style="text-align:center;margin:24px 0 8px;font-size:13px;">
     <a href="https://wldwz.icu" style="color:#0d9488;text-decoration:none;margin:0 12px;">🏠 主站 wldwz.icu</a>
