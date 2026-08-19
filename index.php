@@ -14,14 +14,15 @@ if (!is_dir(CACHE_DIR)) {
     @mkdir(CACHE_DIR, 0777, true);
 }
 
-// 第三方加速节点（大文件分流用：虚拟主机带宽有限，超大文件交给公共 CDN 节点）
-$THIRD_PARTY_NODES = [
-    ['name' => 'Cloudflare 优选', 'host' => 'https://gh-proxy.org',   'note' => '全球高速分发，国内优选 + IPv6 支持'],
-    ['name' => 'Cloudflare v4（推荐）', 'host' => 'https://v4.gh-proxy.org', 'note' => '优选加速，仅 IPv4，智能解析'],
-    ['name' => 'Cloudflare v4/v6', 'host' => 'https://v6.gh-proxy.org', 'note' => '优选加速，支持 IPv6 / IPv4'],
-    ['name' => 'Fastly CDN',       'host' => 'https://cdn.gh-proxy.org', 'note' => 'Fastly CDN 节点加速（v4）'],
-    ['name' => 'AxisNow 三网优选', 'host' => 'https://axisnow.gh-proxy.org', 'note' => '三网优选节点，仅 IPv4'],
-];
+// 第三方加速节点（大文件分流用）：从 nodes.php 读取，自用节点不写死在源码里
+$THIRD_PARTY_NODES = [];
+$nodes_file = __DIR__ . '/nodes.php';
+if (is_file($nodes_file)) {
+    $nodes_cfg = require $nodes_file;
+    if (is_array($nodes_cfg)) {
+        $THIRD_PARTY_NODES = $nodes_cfg;
+    }
+}
 
 // 根据 URL 路径智能选择缓存时长（参考 cf-ghproxy-worker 设计）
 function cache_ttl($url) {
@@ -96,8 +97,8 @@ header('X-Cache-Status: MISS');
 // 大文件：探测大小，超过阈值则流式转发（不缓存，避免撑爆磁盘）
 $remote_size = remote_size($target);
 if ($remote_size !== false && $remote_size > MAX_CACHE_SIZE) {
-    // 超大文件（>200MB）：本机带宽有限，展示第三方加速节点选择页
-    if ($remote_size > BIG_FILE_THRESHOLD) {
+    // 超大文件（>200MB）：配置了第三方节点则展示节点选择页，否则回退流式转发
+    if ($remote_size > BIG_FILE_THRESHOLD && !empty($THIRD_PARTY_NODES)) {
         header('X-Cache-Status: BIG-REDIRECT');
         header('X-Cache-TTL: 0');
         show_third_party($target, $remote_size);
