@@ -315,6 +315,10 @@ button:hover{background:#0f766e;}
 <br>
 <div class="hint"><b>说明：</b>文件首次访问会缓存到服务器，之后秒开。仅供个人加速使用。</div>
 </div>
+<div style="text-align:center;margin:24px 0 8px;font-size:13px;">
+    <a href="https://wldwz.icu" style="color:#0d9488;text-decoration:none;margin:0 12px;">🏠 主站 wldwz.icu</a>
+    <a href="https://blog.wldwz.icu" style="color:#0d9488;text-decoration:none;margin:0 12px;">🐟 鱼鱼 Blog</a>
+</div>
 <script>
 function convert(){
     var v = document.getElementById("src").value.trim();
